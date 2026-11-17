@@ -62,6 +62,9 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     api.getModalities().then(setModalities).catch(() => {});
+    if (savedBets.length > 0) {
+      runAutoCheckAll(savedBets);
+    }
   }, [user]);
 
   useEffect(() => {
@@ -85,6 +88,27 @@ export default function App() {
   }, [user, selectedMod]);
 
   const currentSpec = modalities.find((m) => m.slug === selectedMod);
+
+  async function runAutoCheckAll(currentList) {
+    if (!currentList || currentList.length === 0) return;
+    try {
+      const payload = currentList.map((b) => ({
+        id: String(b.id),
+        modality: b.modality,
+        numbers: b.numbers,
+        target_contest: b.targetContest,
+      }));
+      const res = await api.autoCheckBatch(payload);
+      if (res?.results) {
+        setSavedBets((prev) =>
+          prev.map((item) => {
+            const rep = res.results[String(item.id)];
+            return rep ? { ...item, auditReport: rep } : item;
+          })
+        );
+      }
+    } catch {}
+  }
 
   async function loadIdealDailyPick(modSlug) {
     try {
@@ -116,15 +140,16 @@ export default function App() {
 
   async function handleSyncCurrent(modSlug = selectedMod) {
     setSyncing(true);
-    setStatusAlert({ type: "info", text: `Buscando últimos resultados oficiais da Caixa para ${modSlug.toUpperCase()}...` });
+    setStatusAlert({ type: "info", text: `Atualizando resultados da Caixa e conferindo seus jogos...` });
     try {
       const syncRes = await api.syncModality(modSlug, 50);
       const cal = await api.getCalibration(modSlug);
       setCalibration(cal);
       await loadIdealDailyPick(modSlug);
+      await runAutoCheckAll(savedBets);
       setStatusAlert({
         type: "success",
-        text: `Tudo atualizado! Último concurso carregado: #${syncRes.reference_contest}.`,
+        text: `Tudo atualizado! Último concurso: #${syncRes.reference_contest}. Seus jogos salvos já foram conferidos automaticamente.`,
       });
     } catch (err) {
       setStatusAlert({ type: "error", text: `Não foi possível atualizar agora: ${err.message}` });
@@ -158,7 +183,7 @@ export default function App() {
           .map(([k]) => Number(k));
         const fixCount = currentSpec?.drawn_count >= 15 ? 4 : 2;
         fixed = ranked.slice(0, fixCount);
-        excluded = ranked.slice(-2);
+        excluded = ranked.slice(-5);
         setFixedNums(fixed);
         setExcludedNums(excluded);
       }
@@ -177,7 +202,7 @@ export default function App() {
       }
       setStatusAlert({
         type: "success",
-        text: `Pronto! ${gamesList.length} jogos fortes gerados para o próximo sorteio (#${res.reference_contest}).`,
+        text: `Pronto! ${gamesList.length} jogos inteligentes montados para o próximo sorteio (#${res.reference_contest}).`,
       });
       setUser(await api.me());
     } catch (err) {
@@ -201,22 +226,24 @@ export default function App() {
       prize_breakdown: game.prize_breakdown || [],
       auditReport: null,
     };
-    setSavedBets((prev) => [entry, ...prev]);
+    const updated = [entry, ...savedBets];
+    setSavedBets(updated);
     setSavedIds((prev) => [...prev, keyTag || betKey]);
+    runAutoCheckAll(updated);
     setStatusAlert({
       type: "success",
-      text: `Jogo salvo! Abra a aba "4. Meus Jogos & Pós-Sorteio" para conferir e treinar o sistema após o sorteio.`,
+      text: `Jogo salvo e conferido! Veja os acertos na aba "4. Meus Jogos & Conferência".`,
     });
   }
 
-  async function runPostDrawAudit(bet, applyLearning = false) {
+  async function trainSystemWithResult(bet) {
     setStatusAlert(null);
     try {
       const report = await api.postDrawAudit({
         modality: bet.modality,
         bet_numbers: bet.numbers,
         target_contest: bet.targetContest,
-        apply_learning: applyLearning,
+        apply_learning: true,
       });
 
       setSavedBets((prev) =>
@@ -225,17 +252,14 @@ export default function App() {
         )
       );
 
-      if (applyLearning) {
-        const cal = await api.getCalibration(bet.modality);
-        if (bet.modality === selectedMod) {
-          setCalibration(cal);
-          await loadIdealDailyPick(bet.modality);
-        }
-        setStatusAlert({
-          type: "success",
-          text: `Aprendizado aplicado! Os pesos das dezenas foram recalibrados com base nos erros e acertos do concurso #${report.contest_number}.`,
-        });
+      if (bet.modality === selectedMod) {
+        setCalibration(await api.getCalibration(bet.modality));
+        await loadIdealDailyPick(bet.modality);
       }
+      setStatusAlert({
+        type: "success",
+        text: `Sistema atualizado com o resultado do concurso #${report.contest_number}! O Cartão Ouro já foi ajustado.`,
+      });
     } catch (err) {
       setStatusAlert({ type: "error", text: err.message });
     }
@@ -295,7 +319,7 @@ export default function App() {
 
   function exportCsv(games) {
     const rows = [
-      ["Jogo", "Dezenas", "Forca_do_Jogo_%", "Chance_Nao_Dividir_%", "Soma", "Pares"],
+      ["Jogo", "Dezenas", "Nota_do_Jogo_%", "Chance_Ganhar_Sozinho_%", "Soma", "Pares"],
       ...games.map((g, i) => [
         i + 1,
         g.numbers.map((n) => String(n).padStart(2, "0")).join(" - "),
@@ -317,9 +341,9 @@ export default function App() {
       <div className="min-h-screen flex items-center justify-center p-4 bg-slate-50">
         <div className="clean-card w-full max-w-md rounded-2xl p-8">
           <div className="mb-6">
-            <span className="text-xs uppercase tracking-widest text-indigo-600 font-bold">Análise Inteligente de Loterias</span>
+            <span className="text-xs uppercase tracking-widest text-indigo-600 font-bold">Sistema Inteligente de Loterias</span>
             <h1 className="text-3xl font-extrabold text-slate-900 mt-1">Loto<span className="text-indigo-600">Quant</span></h1>
-            <p className="text-sm text-slate-500 mt-2">Monte jogos equilibrados com base nos sorteios reais da Caixa e acompanhe o desempenho pós-sorteio.</p>
+            <p className="text-sm text-slate-500 mt-2">Monte jogos fortes fugindo das combinações comuns e confira seus acertos automaticamente.</p>
           </div>
           {authError && <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">{authError}</div>}
           <form onSubmit={handleAuth} className="space-y-4">
@@ -350,9 +374,8 @@ export default function App() {
   }
 
   const universe = currentSpec ? Array.from({ length: currentSpec.max_number - currentSpec.min_number + 1 }, (_, i) => currentSpec.min_number + i) : [];
-
-  // Resumo geral de aprendizado acumulado nos jogos auditados
   const auditedBets = savedBets.filter((b) => b.auditReport);
+  const winnersCount = auditedBets.filter((b) => b.auditReport.is_winner).length;
   const avgHits = auditedBets.length > 0
     ? (auditedBets.reduce((acc, b) => acc + b.auditReport.hits_count, 0) / auditedBets.length).toFixed(1)
     : null;
@@ -366,7 +389,7 @@ export default function App() {
             <span className="px-2.5 py-0.5 text-xs rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 uppercase font-bold">Conta {user.plan_tier}</span>
           </div>
           <div className="flex items-center gap-3 text-xs">
-            <span className="text-slate-600">Jogos gerados hoje: <strong className="text-indigo-600">{user.daily_generations_used}</strong></span>
+            <span className="text-slate-600">Jogos montados hoje: <strong className="text-indigo-600">{user.daily_generations_used}</strong></span>
             <button onClick={() => handleSyncCurrent(selectedMod)} disabled={syncing} className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 font-semibold">
               {syncing ? "Buscando na Caixa..." : "Atualizar Resultados da Caixa"}
             </button>
@@ -394,7 +417,7 @@ export default function App() {
                 <span className="text-xs text-slate-700 font-bold">Último Sorteio: Concurso #{calibration.reference_contest} ({calibration.reference_date || "Atualizado"})</span>
               </div>
               <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-xs text-slate-500 font-medium mr-1">Bolas que saíram:</span>
+                <span className="text-xs text-slate-500 font-medium mr-1">Bolas sorteadas:</span>
                 {(calibration.reference_numbers || []).map((n) => (
                   <span key={n} className="px-2 py-0.5 rounded bg-slate-100 border border-slate-300 text-xs font-mono font-bold text-slate-800">{String(n).padStart(2, "0")}</span>
                 ))}
@@ -409,16 +432,16 @@ export default function App() {
           </div>
         )}
 
-        {/* CARTÃO OURO: PALPITE IDEAL DO DIA SEMPRE VISÍVEL */}
+        {/* CARTÃO OURO DO DIA */}
         {idealDailyGame && (
           <div className="rounded-2xl p-5 bg-gradient-to-r from-indigo-50 via-white to-emerald-50 border-2 border-indigo-300 shadow-sm space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="px-3 py-1 rounded-full text-xs font-extrabold bg-indigo-600 text-white uppercase">
-                  Palpite Ideal do Dia • Concurso #{(calibration?.reference_contest || 0) + 1}
+                  Cartão Ouro do Dia • Concurso #{(calibration?.reference_contest || 0) + 1}
                 </span>
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
-                  Força Máxima: {idealDailyGame.adherence_score}%
+                  Nota do Jogo: {idealDailyGame.adherence_score}%
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -429,7 +452,7 @@ export default function App() {
                   onClick={() => saveGameToNotebook(idealDailyGame, "ideal_daily")}
                   className="text-xs px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-bold shadow-sm"
                 >
-                  {savedIds.includes("ideal_daily") ? "Salvo ✓" : "+ Salvar Palpite Ideal"}
+                  {savedIds.includes("ideal_daily") ? "Salvo ✓" : "+ Salvar Cartão Ouro"}
                 </button>
               </div>
             </div>
@@ -444,7 +467,7 @@ export default function App() {
 
             {Array.isArray(idealDailyGame.prize_breakdown) && idealDailyGame.prize_breakdown.length > 0 && (
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                <span className="text-xs font-bold text-slate-600">Chances Estimadas de Premiação:</span>
+                <span className="text-xs font-bold text-slate-600">Chances por Faixa de Prêmio:</span>
                 {idealDailyGame.prize_breakdown.map((p) => (
                   <span key={p.tier} className="px-2.5 py-1 rounded-lg bg-white border border-indigo-200 text-xs font-bold text-indigo-800">
                     {p.tier}: <span className="text-emerald-700">{p.chance}</span>
@@ -464,10 +487,10 @@ export default function App() {
 
         <div className="flex gap-2 border-b border-slate-200 pb-3 overflow-x-auto">
           {[
-            { id: "generator", label: "1. Montar Jogos Inteligentes" },
-            { id: "closing", label: "2. Fechamento com Garantia" },
-            { id: "ev", label: "3. Quanto Apostar (Simulador)" },
-            { id: "saved", label: `4. Meus Jogos & Pós-Sorteio (${savedBets.length})` },
+            { id: "generator", label: "1. Montar Jogos Fortes" },
+            { id: "closing", label: "2. Fechamento (Cercar Sorteio)" },
+            { id: "ev", label: "3. Quanto Apostar Hoje" },
+            { id: "saved", label: `4. Meus Jogos & Conferência (${savedBets.length})` },
             { id: "plans", label: "Planos" },
           ].map((tab) => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap ${activeTab === tab.id ? "bg-slate-900 text-white" : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"}`}>
@@ -482,7 +505,7 @@ export default function App() {
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <h2 className="text-base font-bold text-slate-900">Escolha Suas Dezenas</h2>
-                  <p className="text-xs text-slate-500 mt-1">Toque 1x para <span className="text-indigo-600 font-bold">Fixar</span> • 2x para <span className="text-red-600 font-bold">Tirar do Jogo</span>. Borda roxa = dezenas mais fortes agora.</p>
+                  <p className="text-xs text-slate-500 mt-1">Toque 1x para <span className="text-indigo-600 font-bold">Fixar</span> • 2x para <span className="text-red-600 font-bold">Tirar do Jogo</span>. Borda roxa = dezenas em alta.</p>
                 </div>
                 {(fixedNums.length > 0 || excludedNums.length > 0) && (
                   <button onClick={() => { setFixedNums([]); setExcludedNums([]); }} className="text-xs text-slate-500 hover:text-slate-900 underline font-semibold">Limpar</button>
@@ -518,19 +541,19 @@ export default function App() {
                   </button>
                 </div>
                 <button onClick={() => handleGenerate(true)} disabled={loadingGen || !calibration} className="w-full py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-40">
-                  Gerar Jogos Fixando Automaticamente as Melhores
+                  Quebrar Padrões (Fixar Melhores + Tirar 5 Fracas)
                 </button>
               </div>
             </div>
 
             <div className="lg:col-span-7 clean-card p-5 rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-base font-bold text-slate-900">Jogos Gerados ({generatedGames.length})</h2>
+                <h2 className="text-base font-bold text-slate-900">Jogos Montados ({generatedGames.length})</h2>
                 {generatedGames.length > 0 && <button onClick={() => exportCsv(generatedGames)} className="text-xs px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold">Baixar Planilha</button>}
               </div>
 
               {generatedGames.length === 0 ? (
-                <div className="py-16 text-center text-sm text-slate-400">Clique em "Gerar Jogos" ao lado para montar mais opções além do Palpite Ideal do Dia.</div>
+                <div className="py-16 text-center text-sm text-slate-400">Clique em "Quebrar Padrões" ou "Gerar Jogos" ao lado para criar combinações que fogem das apostas comuns.</div>
               ) : (
                 <div className="space-y-3">
                   {generatedGames.map((game, idx) => {
@@ -541,10 +564,10 @@ export default function App() {
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="text-xs font-extrabold text-slate-700">{idx === 0 ? "★ JOGO #1" : `JOGO #${idx + 1}`}</span>
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">Força: {game.adherence_score}%</span>
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">Nota: {game.adherence_score}%</span>
                             {game.antipopularity_pct && (
                               <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-900">
-                                Não Dividir Prêmio: {game.antipopularity_pct}%
+                                Ganhar Sozinho: {game.antipopularity_pct}%
                               </span>
                             )}
                             <button onClick={() => handleBacktest(game.numbers)} className="text-xs px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold">Pontos Passados</button>
@@ -596,8 +619,8 @@ export default function App() {
           <div className="clean-card p-6 rounded-2xl space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Fechamento Inteligente (Desdobramento)</h2>
-                <p className="text-xs text-slate-500">Escolha mais dezenas ({closingPool.length} marcadas) para cercar o sorteio gastando bem menos bilhetes.</p>
+                <h2 className="text-lg font-bold text-slate-900">Fechamento para Cercar o Sorteio</h2>
+                <p className="text-xs text-slate-500">Escolha mais dezenas ({closingPool.length} marcadas) para cercar o resultado gastando bem menos cartões.</p>
               </div>
               <button onClick={() => { if (!calibration) return; const top18 = Object.entries(calibration.number_weights).filter(([k]) => !k.startsWith("sec_") && !k.includes("_")).sort((a, b) => b[1] - a[1]).slice(0, (currentSpec?.default_bet_size || 15) + 3).map(([k]) => Number(k)).sort((a, b) => a - b); setClosingPool(top18); }} className="px-3.5 py-2 rounded-lg text-xs font-bold bg-indigo-50 border border-indigo-200 text-indigo-700">Escolher 18 Melhores Automaticamente</button>
             </div>
@@ -631,8 +654,8 @@ export default function App() {
         {activeTab === "ev" && (
           <div className="grid lg:grid-cols-12 gap-6">
             <form onSubmit={handleCalculateEv} className="lg:col-span-5 clean-card p-6 rounded-2xl space-y-4">
-              <h2 className="text-lg font-bold text-slate-900">Vale a Pena Apostar Hoje?</h2>
-              <p className="text-xs text-slate-500">Informe o prêmio acumulado e quanto você pretende gastar no mês para saber quantos cartões jogar hoje com segurança.</p>
+              <h2 className="text-lg font-bold text-slate-900">Vale a Pena Apostar Forte Hoje?</h2>
+              <p className="text-xs text-slate-500">Informe o prêmio acumulado e quanto você separou para jogar para saber quantos cartões fazer com segurança.</p>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Valor do Prêmio Principal (R$)</label>
                 <input type="number" step="1000" value={evForm.estimated_jackpot} onChange={(e) => setEvForm({ ...evForm, estimated_jackpot: e.target.value })} className="w-full px-3 py-2 rounded-lg bg-white border border-slate-300" />
@@ -643,7 +666,7 @@ export default function App() {
                   <input type="number" step="0.5" value={evForm.ticket_cost} onChange={(e) => setEvForm({ ...evForm, ticket_cost: e.target.value })} className="w-full px-3 py-2 rounded-lg bg-white border border-slate-300" />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Seu Saldo p/ Loterias (R$)</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Seu Saldo p/ Jogos (R$)</label>
                   <input type="number" step="10" value={evForm.bankroll} onChange={(e) => setEvForm({ ...evForm, bankroll: e.target.value })} className="w-full px-3 py-2 rounded-lg bg-white border border-slate-300" />
                 </div>
               </div>
@@ -656,7 +679,7 @@ export default function App() {
               ) : (
                 <div className="space-y-4">
                   <div className={`p-4 rounded-xl border font-bold text-sm ${evResult.ev_per_ticket > 0 ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-amber-50 border-amber-300 text-amber-900"}`}>
-                    {evResult.ev_per_ticket > 0 ? "MOMENTO EXCELENTE: Prêmio acumulado compensa jogar mais forte!" : "CONCURSO NORMAL: Jogue leve para buscar prêmios menores e guarde saldo para quando acumular."}
+                    {evResult.ev_per_ticket > 0 ? "MOMENTO EXCELENTE: Prêmio acumulado compensa entrar mais forte!" : "CONCURSO NORMAL: Jogue leve para buscar prêmios menores e guarde saldo para quando acumular."}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="p-4 rounded-xl bg-slate-50 border border-slate-200"><span className="text-xs text-slate-500 block">Quanto Gastar Hoje</span><strong className="text-xl text-emerald-700">R$ {evResult.recommended_budget}</strong></div>
@@ -668,24 +691,29 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA 4: MONITORAMENTO PÓS-SORTEIO & TREINAMENTO */}
+        {/* ABA 4: CONFERÊNCIA AUTOMÁTICA E TREINAMENTO */}
         {activeTab === "saved" && (
           <div className="clean-card p-6 rounded-2xl space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Monitoramento Pós-Sorteio & Treinamento</h2>
+                <h2 className="text-lg font-bold text-slate-900">Meus Jogos & Conferência Automática</h2>
                 <p className="text-xs text-slate-500">
-                  Confira onde acertou, quais bolas passaram raspando (vizinhas) e treine o sistema para recalibrar os pesos do próximo concurso.
+                  Os jogos salvos são conferidos automaticamente com os resultados oficiais da Caixa. Verde = acertou • Amarelo = passou raspando por 1 número.
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                {avgHits && (
-                  <span className="px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-xs font-bold text-indigo-800">
-                    Média nas conferências: {avgHits} acertos
-                  </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {auditedBets.length > 0 && (
+                  <>
+                    <span className="px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                      Premiados: {winnersCount} de {auditedBets.length}
+                    </span>
+                    <span className="px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-xs font-bold text-indigo-800">
+                      Média: {avgHits} acertos
+                    </span>
+                  </>
                 )}
                 {savedBets.length > 0 && (
-                  <button onClick={() => setSavedBets([])} className="text-xs text-red-600 font-semibold hover:underline">
+                  <button onClick={() => setSavedBets([])} className="text-xs text-red-600 font-semibold hover:underline ml-2">
                     Apagar Todos
                   </button>
                 )}
@@ -694,7 +722,7 @@ export default function App() {
 
             {savedBets.length === 0 ? (
               <div className="py-12 text-center text-sm text-slate-400">
-                Você ainda não salvou nenhum jogo. Clique em "+ Salvar Jogo" para acompanhar os resultados aqui.
+                Você ainda não salvou nenhum jogo. Clique em "+ Salvar Jogo" para acompanhar os resultados automaticamente aqui.
               </div>
             ) : (
               <div className="space-y-4">
@@ -710,29 +738,23 @@ export default function App() {
                           <span className="font-extrabold uppercase text-indigo-700">{bet.modalityName}</span>
                           <span className="text-slate-500">• Alvo: Concurso #{bet.targetContest}</span>
                           {rep && (
-                            <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-extrabold">
-                              {rep.hits_count} acertos no Conc. #{rep.contest_number}
+                            <span className={`px-2.5 py-0.5 rounded-full font-extrabold ${rep.is_winner ? "bg-emerald-600 text-white" : "bg-indigo-100 text-indigo-800"}`}>
+                              {rep.is_winner ? `PREMIADO: ${rep.hits_count} acertos!` : `${rep.hits_count} acertos (Conc. #${rep.contest_number})`}
                             </span>
                           )}
                           {rep?.trained && (
                             <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-bold">
-                              Modelo Treinado ✓
+                              Ajustado ✓
                             </span>
                           )}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
                           <button
-                            onClick={() => runPostDrawAudit(bet, false)}
-                            className="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700"
-                          >
-                            Conferir Raio-X
-                          </button>
-                          <button
-                            onClick={() => runPostDrawAudit(bet, true)}
+                            onClick={() => trainSystemWithResult(bet)}
                             className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700"
                           >
-                            Treinar Sistema c/ Este Resultado
+                            Ajustar Próximos Jogos c/ Este Resultado
                           </button>
                           <button
                             onClick={() => setSavedBets(savedBets.filter((x) => x.id !== bet.id))}
@@ -743,7 +765,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Bolas com código de cores pós-sorteio: Verde = Acertou | Amarelo = Passou raspando (+-1) | Branco = Errou */}
                       <div className="flex flex-wrap gap-1.5">
                         {bet.numbers.map((n) => {
                           let badge = "bg-white border border-slate-300 text-slate-800";
@@ -761,7 +782,7 @@ export default function App() {
                       </div>
 
                       {rep && (
-                        <div className="p-3 rounded-lg bg-white border border-slate-200 space-y-2 text-xs">
+                        <div className="p-3 rounded-lg bg-white border border-slate-200 space-y-1.5 text-xs">
                           <div className="flex flex-wrap gap-4 text-slate-600">
                             <span><strong className="text-emerald-700">Verde:</strong> Acertou ({rep.hits_count})</span>
                             <span><strong className="text-amber-600">Amarelo:</strong> Passou raspando por 1 número ({rep.near_misses.length})</span>
@@ -769,7 +790,7 @@ export default function App() {
                             <span>Pares: <strong>{rep.comparison.bet_even}</strong> (Sorteio: <strong>{rep.comparison.drawn_even}</strong>)</span>
                           </div>
                           <div className="text-slate-700 font-medium pt-1 border-t border-slate-100">
-                            <strong>Diagnóstico para o próximo jogo:</strong> {rep.diagnostics.join(" ")}
+                            <strong>Resumo:</strong> {rep.diagnostics.join(" ")}
                           </div>
                         </div>
                       )}
@@ -808,7 +829,7 @@ export default function App() {
         </div>
       )}
 
-      <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500 px-4">LotoQuant — Análise inteligente e monitoramento pós-sorteio.</footer>
+      <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500 px-4">LotoQuant — Jogos inteligentes e conferência automática.</footer>
     </div>
   );
 }
