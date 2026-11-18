@@ -294,7 +294,7 @@ export default function App() {
 
   async function handleViewBetResult(bet) {
     const sched = computeNextDrawSchedule(bet.modality, calibration?.reference_date);
-    const fallbackNotice = `Sorteio ainda não realizado! Este jogo será sorteado na ${bet.scheduledWeekday \vert{}\vert{} sched.weekdayName}, dia${bet.scheduledDate || sched.nextDate} às 20h.`;
+    const fallbackNotice = `Sorteio ainda não realizado! Este jogo será sorteado na ${bet.scheduledWeekday || sched.weekdayName}, dia${bet.scheduledDate || sched.nextDate} às 20h.`;
 
     try {
       const report = await api.postDrawAudit({
@@ -1350,3 +1350,4 @@ export default function App() {
     </div>
   );
 }
+
