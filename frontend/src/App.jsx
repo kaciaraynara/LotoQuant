@@ -788,6 +788,7 @@ export default function App() {
                             <span><strong className="text-amber-600">Amarelo:</strong> Passou raspando por 1 número ({rep.near_misses.length})</span>
                             <span>Soma: <strong>{rep.comparison.bet_sum}</strong> (Sorteio: <strong>{rep.comparison.drawn_sum}</strong>)</span>
                             <span>Pares: <strong>{rep.comparison.bet_even}</strong> (Sorteio: <strong>{rep.comparison.drawn_even}</strong>)</span>
+                            <span>Repetidas: <strong>{rep.comparison.bet_repeat ?? 0}</strong> (Sorteio: <strong>{rep.comparison.drawn_repeat ?? 0}</strong>)</span>
                           </div>
                           <div className="text-slate-700 font-medium pt-1 border-t border-slate-100">
                             <strong>Resumo:</strong> {rep.diagnostics.join(" ")}
@@ -833,3 +834,4 @@ export default function App() {
     </div>
   );
 }
+

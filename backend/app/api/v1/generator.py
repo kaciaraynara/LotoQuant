@@ -1,5 +1,6 @@
 ﻿from datetime import date
 from typing import List, Optional
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -54,6 +55,180 @@ class PostDrawAuditRequest(BaseModel):
     apply_learning: bool = False
 
 
+class BatchBetItem(BaseModel):
+    id: str
+    modality: str
+    numbers: List[int]
+    target_contest: Optional[int] = None
+
+
+class AutoBatchCheckRequest(BaseModel):
+    bets: List[BatchBetItem]
+    auto_train: bool = True
+
+
+def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
+    if modality not in MODALITIES:
+        return False
+    spec = MODALITIES[modality]
+    cal = db.execute(select(DailyCalibration).where(DailyCalibration.modality == modality)).scalar_one_or_none()
+    recent_rows = db.execute(
+        select(DrawResult.numbers)
+        .where(DrawResult.modality == modality)
+        .order_by(DrawResult.contest_number.desc())
+        .limit(20)
+    ).scalars().all()
+
+    if not cal or len(recent_rows) < 5:
+        return False
+
+    recent_draws = list(reversed(recent_rows))
+    weights = dict(cal.number_weights or {})
+    universe = range(spec.min_number, spec.max_number + 1)
+    last_3 = set(n for d in recent_draws[-3:] for n in d)
+
+    for n in universe:
+        freq_20 = sum(1 for d in recent_draws if n in d) / len(recent_draws)
+        streak = 0
+        for d in reversed(recent_draws):
+            if n in d:
+                streak += 1
+            else:
+                break
+        delay = 0
+        for d in reversed(recent_draws):
+            if n not in d:
+                delay += 1
+            else:
+                break
+
+        score = (0.50 * freq_20) + (0.30 * min(delay / 5.0, 1.0)) + (0.20 if n in last_3 else 0.0)
+        if streak >= 4:
+            score *= 0.72
+        weights[str(n)] = round(float(np.clip(score, 0.15, 0.96)), 4)
+
+    sums = [sum(d) for d in recent_draws[-15:]]
+    evens = [sum(1 for x in d if x % 2 == 0) for d in recent_draws[-15:]]
+    repeats = [len(set(recent_draws[i]) & set(recent_draws[i - 1])) for i in range(1, len(recent_draws))]
+
+    new_thresh = dict(cal.thresholds or {})
+    new_thresh["sum"] = [int(np.percentile(sums, 20)), int(np.percentile(sums, 80))]
+    new_thresh["even"] = [int(np.percentile(evens, 20)), int(np.percentile(evens, 80))]
+    if repeats:
+        new_thresh["repeat"] = [int(np.percentile(repeats, 20)), int(np.percentile(repeats, 80))]
+    new_thresh["last_draw"] = recent_draws[-1]
+
+    cal.number_weights = weights
+    cal.thresholds = new_thresh
+    db.commit()
+    return True
+
+
+def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], target_contest: Optional[int] = None):
+    spec = MODALITIES[modality]
+    draw_row = None
+    if target_contest:
+        draw_row = db.execute(
+            select(DrawResult).where(
+                DrawResult.modality == modality,
+                DrawResult.contest_number == target_contest,
+            )
+        ).scalar_one_or_none()
+
+    if not draw_row:
+        draw_row = db.execute(
+            select(DrawResult)
+            .where(DrawResult.modality == modality)
+            .order_by(DrawResult.contest_number.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    if not draw_row:
+        return None
+
+    # Busca o sorteio imediatamente anterior ao concurso conferido para medir repetidas reais
+    prev_draw_row = db.execute(
+        select(DrawResult)
+        .where(
+            DrawResult.modality == modality,
+            DrawResult.contest_number < draw_row.contest_number,
+        )
+        .order_by(DrawResult.contest_number.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    drawn = sorted(draw_row.numbers)
+    bet = sorted(bet_numbers)
+    drawn_set = set(drawn)
+    bet_set = set(bet)
+
+    hits = sorted(list(bet_set & drawn_set))
+    missed_bet = sorted(list(bet_set - drawn_set))
+    missed_drawn = sorted(list(drawn_set - bet_set))
+    near_misses = sorted([b for b in missed_bet if (b - 1 in missed_drawn) or (b + 1 in missed_drawn)])
+
+    min_prize = {
+        "lotofacil": 11, "megasena": 4, "quina": 2, "lotomania": 15,
+        "diadesorte": 4, "timemania": 3, "duplasena": 3, "maismilionaria": 2, "supersete": 3,
+    }.get(modality, 4)
+
+    is_winner = len(hits) >= min_prize
+    frame_set = get_frame_numbers(spec)
+    bet_sum, drawn_sum = sum(bet), sum(drawn)
+    bet_even = sum(1 for n in bet if n % 2 == 0)
+    drawn_even = sum(1 for n in drawn if n % 2 == 0)
+    bet_frame = len(bet_set & frame_set)
+    drawn_frame = len(drawn_set & frame_set)
+
+    bet_rep = len(bet_set & set(prev_draw_row.numbers)) if prev_draw_row else 0
+    drawn_rep = len(drawn_set & set(prev_draw_row.numbers)) if prev_draw_row else 0
+
+    diagnostics = []
+    if is_winner:
+        diagnostics.append(f"BILHETE PREMIADO! Você fez {len(hits)} acertos no concurso #{draw_row.contest_number}.")
+    else:
+        missing_to_prize = min_prize - len(hits)
+        diagnostics.append(f"Faltaram {missing_to_prize} ponto(s) para premiação mínima ({min_prize} pts).")
+
+    if abs(bet_sum - drawn_sum) > 20:
+        direction = "mais alta" if drawn_sum > bet_sum else "mais baixa"
+        diagnostics.append(f"Soma do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum}).")
+    if abs(bet_even - drawn_even) >= 2:
+        diagnostics.append(f"Pares: aposta tinha {bet_even}, mas o sorteio trouxe {drawn_even}.")
+    if abs(bet_frame - drawn_frame) >= 2:
+        diagnostics.append(f"Moldura: aposta tinha {bet_frame} na borda, sorteio trouxe {drawn_frame}.")
+    if prev_draw_row and abs(bet_rep - drawn_rep) >= 2:
+        diagnostics.append(f"Repetidas do anterior: aposta marcou {bet_rep}, sorteio repetiu {drawn_rep}.")
+    if near_misses:
+        diagnostics.append(f"Passaram raspando por 1 número: {', '.join(f'{n:02d}' for n in near_misses)}.")
+    if missed_drawn:
+        diagnostics.append(f"Bolas sorteadas que ficaram de fora: {', '.join(f'{n:02d}' for n in missed_drawn)}.")
+
+    return {
+        "contest_number": draw_row.contest_number,
+        "draw_date": str(draw_row.draw_date),
+        "drawn_numbers": drawn,
+        "bet_numbers": bet,
+        "hits_count": len(hits),
+        "is_winner": is_winner,
+        "hits": hits,
+        "missed_bet": missed_bet,
+        "missed_drawn": missed_drawn,
+        "near_misses": near_misses,
+        "comparison": {
+            "bet_sum": bet_sum,
+            "drawn_sum": drawn_sum,
+            "bet_even": bet_even,
+            "drawn_even": drawn_even,
+            "bet_frame": bet_frame,
+            "drawn_frame": drawn_frame,
+            "bet_repeat": bet_rep,
+            "drawn_repeat": drawn_rep,
+        },
+        "diagnostics": diagnostics,
+    }
+
+
 @router.get("/modalities")
 def list_modalities():
     return [
@@ -102,104 +277,35 @@ def get_calibration(modality: str, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/auto-check-batch")
+def auto_check_batch(body: AutoBatchCheckRequest, db: Session = Depends(get_db)):
+    results = {}
+    trained_modalities = set()
+    for item in body.bets:
+        if item.modality not in MODALITIES:
+            continue
+        rep = _evaluate_single_audit(db, item.modality, item.numbers, item.target_contest)
+        if rep:
+            if body.auto_train and item.modality not in trained_modalities:
+                if _recalibrate_modality_weights(db, item.modality):
+                    trained_modalities.add(item.modality)
+            rep["trained"] = item.modality in trained_modalities
+            results[item.id] = rep
+    return {"results": results, "trained_modalities": list(trained_modalities)}
+
+
 @router.post("/post-draw-audit")
 def post_draw_audit(body: PostDrawAuditRequest, db: Session = Depends(get_db)):
     if body.modality not in MODALITIES:
         raise HTTPException(status_code=404, detail="Modalidade inválida.")
 
-    spec = MODALITIES[body.modality]
-    draw_row = None
-    if body.target_contest:
-        draw_row = db.execute(
-            select(DrawResult).where(
-                DrawResult.modality == body.modality,
-                DrawResult.contest_number == body.target_contest,
-            )
-        ).scalar_one_or_none()
-
-    if not draw_row:
-        draw_row = db.execute(
-            select(DrawResult)
-            .where(DrawResult.modality == body.modality)
-            .order_by(DrawResult.contest_number.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-
-    if not draw_row:
+    rep = _evaluate_single_audit(db, body.modality, body.bet_numbers, body.target_contest)
+    if not rep:
         raise HTTPException(status_code=404, detail="Nenhum resultado oficial sincronizado para conferir.")
 
-    drawn = sorted(draw_row.numbers)
-    bet = sorted(body.bet_numbers)
-    drawn_set = set(drawn)
-    bet_set = set(bet)
-
-    hits = sorted(list(bet_set & drawn_set))
-    missed_bet = sorted(list(bet_set - drawn_set))
-    missed_drawn = sorted(list(drawn_set - bet_set))
-
-    # Dezenas que passaram raspando (+1 ou -1 de diferença)
-    near_misses = sorted([
-        b for b in missed_bet
-        if (b - 1 in missed_drawn) or (b + 1 in missed_drawn)
-    ])
-
-    frame_set = get_frame_numbers(spec)
-    bet_sum, drawn_sum = sum(bet), sum(drawn)
-    bet_even = sum(1 for n in bet if n % 2 == 0)
-    drawn_even = sum(1 for n in drawn if n % 2 == 0)
-    bet_frame = len(bet_set & frame_set)
-    drawn_frame = len(drawn_set & frame_set)
-
-    diagnostics = []
-    if abs(bet_sum - drawn_sum) > 25:
-        direction = "mais alto" if drawn_sum > bet_sum else "mais baixo"
-        diagnostics.append(f"Soma do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum}).")
-    if abs(bet_even - drawn_even) >= 2:
-        diagnostics.append(f"Equilíbrio de pares: aposta tinha {bet_even} pares, mas saíram {drawn_even}.")
-    if abs(bet_frame - drawn_frame) >= 2:
-        diagnostics.append(f"Moldura: aposta marcou {bet_frame} na borda, sorteio trouxe {drawn_frame}.")
-    if len(near_misses) >= 3:
-        diagnostics.append(f"{len(near_misses)} dezenas passaram raspando por 1 número ({', '.join(f'{n:02d}' for n in near_misses)}).")
-    if not diagnostics:
-        diagnostics.append("Estrutura do jogo muito bem alinhada ao comportamento real do sorteio.")
-
-    # Treinamento adaptativo: reforça dezenas sorteadas que ficaram de fora e suaviza peso das que falharam
-    trained = False
-    if body.apply_learning:
-        cal = db.execute(select(DailyCalibration).where(DailyCalibration.modality == body.modality)).scalar_one_or_none()
-        if cal and cal.number_weights:
-            weights = dict(cal.number_weights)
-            for n in missed_drawn:
-                key = str(n)
-                weights[key] = round(min(0.98, float(weights.get(key, 0.5)) + 0.08), 4)
-            for n in missed_bet:
-                key = str(n)
-                weights[key] = round(max(0.12, float(weights.get(key, 0.5)) - 0.05), 4)
-            cal.number_weights = weights
-            db.commit()
-            trained = True
-
-    return {
-        "contest_number": draw_row.contest_number,
-        "draw_date": str(draw_row.draw_date),
-        "drawn_numbers": drawn,
-        "bet_numbers": bet,
-        "hits_count": len(hits),
-        "hits": hits,
-        "missed_bet": missed_bet,
-        "missed_drawn": missed_drawn,
-        "near_misses": near_misses,
-        "comparison": {
-            "bet_sum": bet_sum,
-            "drawn_sum": drawn_sum,
-            "bet_even": bet_even,
-            "drawn_even": drawn_even,
-            "bet_frame": bet_frame,
-            "drawn_frame": drawn_frame,
-        },
-        "diagnostics": diagnostics,
-        "trained": trained,
-    }
+    trained = _recalibrate_modality_weights(db, body.modality) if body.apply_learning else False
+    rep["trained"] = trained
+    return rep
 
 
 @router.post("/syndicate-ev")
