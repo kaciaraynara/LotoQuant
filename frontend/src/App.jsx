@@ -22,11 +22,71 @@ import {
   Copy,
   Check,
   X,
-  BellRing,
   PartyPopper,
 } from "lucide-react";
 import { api } from "./services/api";
 import LandingPage from "./components/LandingPage";
+
+const DRAW_WEEKDAYS = {
+  lotofacil: [1, 2, 3, 4, 5, 6],
+  quina: [1, 2, 3, 4, 5, 6],
+  supersete: [1, 3, 5],
+  lotomania: [1, 3, 5],
+  duplasena: [1, 3, 5],
+  megasena: [2, 4, 6],
+  diadesorte: [2, 4, 6],
+  timemania: [2, 4, 6],
+  maismilionaria: [3, 6],
+};
+
+const WEEKDAY_NAMES = [
+  "Domingo",
+  "Segunda-feira",
+  "Terça-feira",
+  "Quarta-feira",
+  "Quinta-feira",
+  "Sexta-feira",
+  "Sábado",
+];
+
+function computeNextDrawSchedule(slug, lastDrawDateStr = null) {
+  const allowed = DRAW_WEEKDAYS[slug] || [1, 2, 3, 4, 5, 6];
+  const isDaily = allowed.length >= 6;
+  const now = new Date();
+  let base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  if (lastDrawDateStr && /^\d{4}-\d{2}-\d{2}$/.test(lastDrawDateStr)) {
+    const [y, m, d] = lastDrawDateStr.split("-").map(Number);
+    const afterLast = new Date(y, m - 1, d + 1);
+    if (afterLast > base) {
+      base = afterLast;
+    }
+  }
+
+  for (let offset = 0; offset < 8; offset++) {
+    const cand = new Date(base.getFullYear(), base.getMonth(), base.getDate() + offset);
+    if (allowed.includes(cand.getDay())) {
+      const dd = String(cand.getDate()).padStart(2, "0");
+      const mm = String(cand.getMonth() + 1).padStart(2, "0");
+      const yyyy = cand.getFullYear();
+      const dateFormatted = `\${dd}/${mm}/${yyyy}`;
+      const weekdayName = WEEKDAY_NAMES[cand.getDay()];
+      return {
+        isDaily,
+        nextDate: dateFormatted,
+        weekdayName,
+        scheduleText: `${weekdayName},${dateFormatted} às 20h`,
+      };
+    }
+  }
+
+  return {
+    isDaily,
+    nextDate: now.toLocaleDateString("pt-BR"),
+    weekdayName: WEEKDAY_NAMES[now.getDay()],
+    scheduleText: `${WEEKDAY_NAMES[now.getDay()]},${now.toLocaleDateString("pt-BR")} às 20h`,
+  };
+}
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -119,6 +179,7 @@ export default function App() {
   }, [user, selectedMod]);
 
   const currentSpec = modalities.find((m) => m.slug === selectedMod);
+  const currentSchedule = computeNextDrawSchedule(selectedMod, calibration?.reference_date);
 
   async function runAutoCheckAll(currentList) {
     if (!currentList || currentList.length === 0) return;
@@ -189,70 +250,10 @@ export default function App() {
       await runAutoCheckAll(savedBets);
       setStatusAlert({
         type: "success",
-        text: `Tudo em dia! Último sorteio oficial: Concurso #${syncRes.reference_contest}.`,
+        text: `Tudo em dia! Último sorteio oficial: Concurso #\${syncRes.reference_contest}.`,
       });
     } catch (err) {
-      setStatusAlert({ type: "error", text: `Não foi possível atualizar agora: ${err.message}` });
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  function toggleNumberFilter(num) {
-    if (fixedNums.includes(num)) {
-      setFixedNums(fixedNums.filter((n) => n !== num));
-      setExcludedNums([...excludedNums, num]);
-    } else if (excludedNums.includes(num)) {
-      setExcludedNums(excludedNums.filter((n) => n !== num));
-    } else {
-      setFixedNums([...fixedNums, num]);
-    }
-  }
-
-  function copyNumbers(numbers, tag) {
-    const text = numbers.map((n) => String(n).padStart(2, "0")).join(" - ");
-    navigator.clipboard.writeText(text);
-    setCopiedKey(tag);
-    setTimeout(() => setCopiedKey(""), 2200);
-  }
-
-  async function handleGenerate(autoSmart = false) {
-    setLoadingGen(true);
-    setStatusAlert(null);
-    try {
-      let fixed = fixedNums;
-      let excluded = excludedNums;
-
-      if (autoSmart && calibration?.number_weights) {
-        const ranked = Object.entries(calibration.number_weights)
-          .filter(([k]) => !k.startsWith("sec_") && !k.includes("_"))
-          .sort((a, b) => b[1] - a[1])
-          .map(([k]) => Number(k));
-        const fixCount = currentSpec?.drawn_count >= 15 ? 4 : 2;
-        fixed = ranked.slice(0, fixCount);
-        excluded = ranked.slice(-5);
-        setFixedNums(fixed);
-        setExcludedNums(excluded);
-      }
-
-      const res = await api.generate({
-        modality: selectedMod,
-        quantity: Number(quantity),
-        fixed_numbers: fixed,
-        excluded_numbers: excluded,
-      });
-
-      const gamesList = Array.isArray(res?.games) ? res.games : [];
-      setGeneratedGames(gamesList);
-      if (gamesList.length > 0 && gamesList[0].antipopularity_pct) {
-        setEvForm((prev) => ({ ...prev, antipopularity_pct: gamesList[0].antipopularity_pct }));
-      }
-      const nextDateText = calibration?.next_draw_info
-        ? ` (${calibration.next_draw_info.weekday_name}, ${calibration.next_draw_info.next_date})`
-        : "";
-      setStatusAlert({
-        type: "success",
-        text: `Pronto! ${gamesList.length} jogos preparados para o Concurso #${res.reference_contest}${nextDateText}.`,
+      setStatusAlert({ type: "error", text: `Não foi possível atualizar agora: ${err.message}` }); } finally { setSyncing(false); } }  function toggleNumberFilter(num) { if (fixedNums.includes(num)) { setFixedNums(fixedNums.filter((n) => n !== num)); setExcludedNums([...excludedNums, num]); } else if (excludedNums.includes(num)) { setExcludedNums(excludedNums.filter((n) => n !== num)); } else { setFixedNums([...fixedNums, num]); } }  function copyNumbers(numbers, tag) { const text = numbers.map((n) => String(n).padStart(2, "0")).join(" - "); navigator.clipboard.writeText(text); setCopiedKey(tag); setTimeout(() => setCopiedKey(""), 2200); }  async function handleGenerate(autoSmart = false) { setLoadingGen(true); setStatusAlert(null); try { let fixed = fixedNums; let excluded = excludedNums;  if (autoSmart && calibration?.number_weights) { const ranked = Object.entries(calibration.number_weights) .filter(([k]) => !k.startsWith("sec_") && !k.includes("_")) .sort((a, b) => b[1] - a[1]) .map(([k]) => Number(k)); const fixCount = currentSpec?.drawn_count >= 15 ? 4 : 2; fixed = ranked.slice(0, fixCount); excluded = ranked.slice(-5); setFixedNums(fixed); setExcludedNums(excluded); }  const res = await api.generate({ modality: selectedMod, quantity: Number(quantity), fixed_numbers: fixed, excluded_numbers: excluded, });  const gamesList = Array.isArray(res?.games) ? res.games : []; setGeneratedGames(gamesList); if (gamesList.length > 0 && gamesList[0].antipopularity_pct) { setEvForm((prev) => ({ ...prev, antipopularity_pct: gamesList[0].antipopularity_pct })); } setStatusAlert({ type: "success", text: `Pronto! ${gamesList.length} jogos preparados para o Concurso #${res.reference_contest} (${currentSchedule.scheduleText}).`,
       });
       setUser(await api.me());
     } catch (err) {
@@ -265,13 +266,15 @@ export default function App() {
   function saveGameToNotebook(game, keyTag = "") {
     if (!game || !Array.isArray(game.numbers)) return;
     const betKey = `${selectedMod}-${game.numbers.join(",")}`;
+    const sched = computeNextDrawSchedule(selectedMod, calibration?.reference_date);
     const entry = {
       id: `${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       modality: selectedMod,
       modalityName: currentSpec?.name || selectedMod.toUpperCase(),
-      isDaily: currentSpec?.is_daily ?? false,
-      drawDays: currentSpec?.draw_days || "",
-      nextDrawInfo: calibration?.next_draw_info || null,
+      isDaily: sched.isDaily,
+      scheduledDate: sched.nextDate,
+      scheduledWeekday: sched.weekdayName,
+      scheduleText: sched.scheduleText,
       targetContest: (calibration?.reference_contest || 0) + 1,
       savedAt: new Date().toLocaleDateString("pt-BR"),
       numbers: [...game.numbers],
@@ -283,16 +286,16 @@ export default function App() {
     setSavedBets(updated);
     setSavedIds((prev) => [...prev, keyTag || betKey]);
     runAutoCheckAll(updated);
-    const drawDateLabel = calibration?.next_draw_info
-      ? ` Sorteio marcado para ${calibration.next_draw_info.weekday_name}, dia ${calibration.next_draw_info.next_date}.`
-      : "";
     setStatusAlert({
       type: "success",
-      text: `Jogo salvo com sucesso!${drawDateLabel}`,
+      text: `Jogo salvo! Sorteio marcado para \${sched.scheduleText}.`,
     });
   }
 
   async function handleViewBetResult(bet) {
+    const sched = computeNextDrawSchedule(bet.modality, calibration?.reference_date);
+    const fallbackNotice = `Sorteio ainda não realizado! Este jogo será sorteado na ${bet.scheduledWeekday \vert{}\vert{} sched.weekdayName}, dia${bet.scheduledDate || sched.nextDate} às 20h.`;
+
     try {
       const report = await api.postDrawAudit({
         modality: bet.modality,
@@ -301,17 +304,36 @@ export default function App() {
         apply_learning: false,
       });
 
+      // Se o backend retornou PENDING OU se o concurso retornado ainda é menor que o concurso-alvo do bilhete, trava!
+      if (report.status === "PENDING" || report.contest_number < bet.targetContest) {
+        const lockedReport = {
+          ...report,
+          status: "PENDING",
+          draw_date: bet.scheduledDate || sched.nextDate,
+          weekday_name: bet.scheduledWeekday || sched.weekdayName,
+          schedule_notice: fallbackNotice,
+        };
+        setSavedBets((prev) =>
+          prev.map((item) => (item.id === bet.id ? { ...item, auditReport: lockedReport } : item))
+        );
+        setScheduleModal({ bet, report: lockedReport });
+        return;
+      }
+
       setSavedBets((prev) =>
         prev.map((item) => (item.id === bet.id ? { ...item, auditReport: report } : item))
       );
-
-      if (report.status === "PENDING") {
-        setScheduleModal({ bet, report });
-      } else {
-        setResultModal({ bet, report });
-      }
-    } catch (err) {
-      setStatusAlert({ type: "error", text: err.message });
+      setResultModal({ bet, report });
+    } catch {
+      const lockedReport = {
+        status: "PENDING",
+        contest_number: bet.targetContest,
+        draw_date: bet.scheduledDate || sched.nextDate,
+        weekday_name: bet.scheduledWeekday || sched.weekdayName,
+        schedule_notice: fallbackNotice,
+        diagnostics: [fallbackNotice],
+      };
+      setScheduleModal({ bet, report: lockedReport });
     }
   }
 
@@ -336,7 +358,7 @@ export default function App() {
       setResultModal(null);
       setStatusAlert({
         type: "success",
-        text: `Cartão Ouro atualizado com os dados do Concurso #${report.contest_number}!`,
+        text: `Cartão Ouro atualizado com os dados do Concurso #\${report.contest_number}!`,
       });
     } catch (err) {
       setStatusAlert({ type: "error", text: err.message });
@@ -388,28 +410,7 @@ export default function App() {
     try {
       await api.upgradePlan(user.email, tier);
       setUser(await api.me());
-      setStatusAlert({ type: "success", text: `Plano ${tier.toUpperCase()} ativado.` });
-      setActiveTab("generator");
-    } catch (err) {
-      setStatusAlert({ type: "error", text: err.message });
-    }
-  }
-
-  function exportCsv(games) {
-    const rows = [
-      ["Jogo", "Dezenas", "Forca_do_Jogo_%", "Ganhar_Sozinho_%"],
-      ...games.map((g, i) => [
-        i + 1,
-        g.numbers.map((n) => String(n).padStart(2, "0")).join(" - "),
-        g.adherence_score,
-        g.antipopularity_pct ?? "-",
-      ]),
-    ];
-    const csv = rows.map((r) => r.join(";")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `jogos_${selectedMod}.csv`;
+      setStatusAlert({ type: "success", text: `Plano ${tier.toUpperCase()} ativado.` }); setActiveTab("generator"); } catch (err) { setStatusAlert({ type: "error", text: err.message }); } }  function exportCsv(games) { const rows = [ ["Jogo", "Dezenas", "Forca_do_Jogo_\%", "Ganhar_Sozinho_\%"], ...games.map((g, i) => [ i + 1, g.numbers.map((n) => String(n).padStart(2, "0")).join(" - "), g.adherence_score, g.antipopularity_pct ?? "-", ]), ]; const csv = rows.map((r) => r.join(";")).join("\n"); const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `jogos_${selectedMod}.csv`;
     a.click();
   }
   if (!user) {
@@ -428,7 +429,7 @@ export default function App() {
   const universe = currentSpec
     ? Array.from({ length: currentSpec.max_number - currentSpec.min_number + 1 }, (_, i) => currentSpec.min_number + i)
     : [];
-  const auditedBets = savedBets.filter((b) => b.auditReport && b.auditReport.status === "AUDITED");
+  const auditedBets = savedBets.filter((b) => b.auditReport && b.auditReport.status === "AUDITED" && b.auditReport.contest_number >= b.targetContest);
   const winnersCount = auditedBets.filter((b) => b.auditReport.is_winner).length;
   const avgHits = auditedBets.length > 0
     ? (auditedBets.reduce((acc, b) => acc + b.auditReport.hits_count, 0) / auditedBets.length).toFixed(1)
@@ -516,22 +517,25 @@ export default function App() {
 
         {/* Seletor de Loterias */}
         <div className="flex gap-2 overflow-x-auto pb-1">
-          {modalities.map((m) => (
-            <button
-              key={m.slug}
-              onClick={() => setSelectedMod(m.slug)}
-              className={`px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap border transition flex items-center gap-1.5 ${
-                selectedMod === m.slug
-                  ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-600/20"
-                  : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
-              }`}
-            >
-              <span>{m.name}</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${selectedMod === m.slug ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"}`}>
-                {m.is_daily ? "Todo Dia" : "Dias Marcados"}
-              </span>
-            </button>
-          ))}
+          {modalities.map((m) => {
+            const sched = computeNextDrawSchedule(m.slug);
+            return (
+              <button
+                key={m.slug}
+                onClick={() => setSelectedMod(m.slug)}
+                className={`px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap border transition flex items-center gap-1.5 ${
+                  selectedMod === m.slug
+                    ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-600/20"
+                    : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                }`}
+              >
+                <span>{m.name}</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${selectedMod === m.slug ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"}`}>
+                  {sched.isDaily ? "Diário" : "Dias Marcados"}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         {/* Painel do Último Resultado Oficial + Data do Próximo Sorteio Sempre Visível */}
@@ -560,21 +564,19 @@ export default function App() {
               </div>
             </div>
 
-            {calibration.next_draw_info && (
-              <div className="px-4 py-3 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
-                  <CalendarClock className="w-5 h-5" />
-                </div>
-                <div>
-                  <span className="text-[11px] font-extrabold uppercase text-indigo-600 block">
-                    Próximo Sorteio • Concurso #{calibration.reference_contest + 1}
-                  </span>
-                  <strong className="text-sm font-extrabold text-slate-900">
-                    {calibration.next_draw_info.weekday_name}, {calibration.next_draw_info.next_date} às 20h
-                  </strong>
-                </div>
+            <div className="px-4 py-3 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                <CalendarClock className="w-5 h-5" />
               </div>
-            )}
+              <div>
+                <span className="text-[11px] font-extrabold uppercase text-indigo-600 block">
+                  Próximo Sorteio • Concurso #{calibration.reference_contest + 1}
+                </span>
+                <strong className="text-sm font-extrabold text-slate-900">
+                  {currentSchedule.scheduleText}
+                </strong>
+              </div>
+            </div>
           </div>
         )}
 
@@ -587,11 +589,9 @@ export default function App() {
                   <Star className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
                   Cartão Ouro • Concurso #{(calibration?.reference_contest || 0) + 1}
                 </span>
-                {calibration?.next_draw_info && (
-                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-white border border-indigo-200 text-indigo-800">
-                    Sorteio: {calibration.next_draw_info.weekday_name} ({calibration.next_draw_info.next_date})
-                  </span>
-                )}
+                <span className="px-3 py-1 rounded-full text-xs font-bold bg-white border border-indigo-200 text-indigo-800">
+                  Data do Sorteio: {currentSchedule.scheduleText}
+                </span>
                 <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
                   Mira 1º e 2º Prêmio: {idealDailyGame.adherence_score}%
                 </span>
@@ -759,7 +759,10 @@ export default function App() {
 
             <div className="lg:col-span-7 clean-card p-5 rounded-2xl space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="text-base font-extrabold text-slate-900">Jogos Selecionados ({generatedGames.length})</h2>
+                <div>
+                  <h2 className="text-base font-extrabold text-slate-900">Jogos Selecionados ({generatedGames.length})</h2>
+                  <p className="text-xs text-slate-500">Para o Concurso #{(calibration?.reference_contest || 0) + 1} • {currentSchedule.scheduleText}</p>
+                </div>
                 {generatedGames.length > 0 && (
                   <button
                     onClick={() => exportCsv(generatedGames)}
@@ -993,7 +996,7 @@ export default function App() {
               <div>
                 <h2 className="text-lg font-extrabold text-slate-900">Meus Jogos & Conferência Automática</h2>
                 <p className="text-xs text-slate-500">
-                  Assim que o sorteio ocorre, a apuração acontece sozinha e você recebe os parabéns na hora quando premiar.
+                  Cada bilhete mostra o dia exato do sorteio. Loterias que não correm hoje ficam bloqueadas até o sorteio oficial sair.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -1027,15 +1030,18 @@ export default function App() {
               <div className="space-y-4">
                 {savedBets.map((bet) => {
                   const rep = bet.auditReport;
-                  const isPending = rep?.status === "PENDING";
-                  const hitSet = new Set(rep?.hits || []);
-                  const nearSet = new Set(rep?.near_misses || []);
+                  const sched = computeNextDrawSchedule(bet.modality);
+                  const displayDate = bet.scheduleText || sched.scheduleText;
+                  // Trava se o relatório vier como PENDING, se ainda não foi apurado, ou se o concurso retornado for anterior ao concurso-alvo
+                  const isLocked = !rep || rep.status === "PENDING" || rep.contest_number < bet.targetContest;
+                  const hitSet = new Set(!isLocked ? rep?.hits || [] : []);
+                  const nearSet = new Set(!isLocked ? rep?.near_misses || [] : []);
 
                   return (
                     <div
                       key={bet.id}
                       className={`p-4 rounded-2xl border space-y-3 transition ${
-                        isPending
+                        isLocked
                           ? "bg-amber-50/40 border-amber-200"
                           : rep?.is_winner
                           ? "bg-emerald-50/60 border-emerald-400"
@@ -1045,14 +1051,21 @@ export default function App() {
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span className="font-extrabold uppercase text-indigo-700">{bet.modalityName}</span>
-                          <span className="text-slate-600 font-bold">• Concurso #{bet.targetContest}</span>
+                          <span className="px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-700 font-bold">
+                            {sched.isDaily ? "Sorteio Diário" : "Dias Específicos"}
+                          </span>
+                          <span className="text-slate-700 font-bold">• Concurso #{bet.targetContest}</span>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-extrabold bg-white border border-slate-300 text-slate-800">
+                            <CalendarClock className="w-3 h-3 text-indigo-600" />
+                            Data do Sorteio: {displayDate}
+                          </span>
 
-                          {isPending ? (
+                          {isLocked ? (
                             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-extrabold bg-amber-100 text-amber-900 border border-amber-300">
                               <Lock className="w-3 h-3" />
-                              Sorteio {rep.weekday_name}, {rep.draw_date} às 20h
+                              Aguardando Sorteio
                             </span>
-                          ) : rep ? (
+                          ) : (
                             <span
                               className={`px-3 py-0.5 rounded-full font-extrabold ${
                                 rep.is_winner ? "bg-emerald-600 text-white shadow-sm" : "bg-indigo-100 text-indigo-800"
@@ -1062,23 +1075,23 @@ export default function App() {
                                 ? `PARABÉNS! PREMIADO COM ${rep.hits_count} ACERTOS!`
                                 : `${rep.hits_count} acertos (Conc. #${rep.contest_number})`}
                             </span>
-                          ) : null}
+                          )}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             onClick={() => handleViewBetResult(bet)}
                             className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-sm ${
-                              isPending
+                              isLocked
                                 ? "bg-amber-500 hover:bg-amber-600 text-white"
                                 : "bg-indigo-600 hover:bg-indigo-700 text-white"
                             }`}
                           >
-                            {isPending ? <BellRing className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                            {isPending ? "Ver Data do Sorteio" : "Ver Resultado"}
+                            {isLocked ? <Lock className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            Ver Resultado
                           </button>
 
-                          {!isPending && rep && (
+                          {!isLocked && (
                             <button
                               onClick={() => trainSystemWithResult(bet)}
                               className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition"
@@ -1099,7 +1112,7 @@ export default function App() {
                       <div className="flex flex-wrap gap-1.5">
                         {bet.numbers.map((n) => {
                           let badge = "bg-white border border-slate-300 text-slate-800";
-                          if (rep && !isPending) {
+                          if (!isLocked) {
                             if (hitSet.has(n)) badge = "bg-emerald-600 text-white shadow-sm";
                             else if (nearSet.has(n)) badge = "bg-amber-400 text-slate-950 font-extrabold";
                             else badge = "bg-slate-200 text-slate-500";
@@ -1112,22 +1125,20 @@ export default function App() {
                         })}
                       </div>
 
-                      {rep && (
-                        <div className="p-3 rounded-xl bg-white border border-slate-200 text-xs text-slate-700 font-semibold">
-                          {isPending ? (
-                            <span className="text-amber-900 flex items-center gap-1.5">
-                              <CalendarClock className="w-4 h-4 text-amber-600 shrink-0" />
-                              {rep.schedule_notice} Assim que o sorteio ocorrer, o resultado aparece aqui automaticamente.
-                            </span>
-                          ) : (
-                            <span>
-                              {rep.is_winner
-                                ? `Parabéns pelo resultado! Você cravou ${rep.hits_count} dezenas neste concurso.`
-                                : rep.diagnostics.join(" ")}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                      <div className="p-3 rounded-xl bg-white border border-slate-200 text-xs text-slate-700 font-semibold">
+                        {isLocked ? (
+                          <span className="text-amber-900 flex items-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                            Sorteio ainda não realizado • Previsto para {displayDate}. O resultado será liberado automaticamente após a apuração oficial.
+                          </span>
+                        ) : (
+                          <span>
+                            {rep.is_winner
+                              ? `Parabéns pelo resultado! Você cravou ${rep.hits_count} dezenas neste concurso.`
+                              : rep.diagnostics.join(" ")}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -1170,14 +1181,14 @@ export default function App() {
         )}
       </main>
 
-      {/* MODAL 1: NOTIFICAÇÃO DE DATA DO SORTEIO (JOGO TRAVADO) */}
+      {/* MODAL 1: BLOQUEIO DE SORTEIO AINDA NÃO REALIZADO */}
       {scheduleModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
           <div className="clean-card max-w-md w-full p-6 rounded-3xl space-y-4 animate-fade-up">
             <div className="flex items-center justify-between">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-extrabold">
-                <CalendarClock className="w-4 h-4" />
-                Aguardando Data do Sorteio
+                <Lock className="w-4 h-4" />
+                Sorteio Ainda Não Realizado
               </div>
               <button onClick={() => setScheduleModal(null)} className="p-1 rounded-lg hover:bg-slate-100">
                 <X className="w-4 h-4 text-slate-500" />
@@ -1193,12 +1204,12 @@ export default function App() {
                 {scheduleModal.report.schedule_notice}
               </p>
               <p className="text-xs text-amber-800">
-                Este bilhete fica protegido até a divulgação oficial das dezenas. Assim que o sorteio acontecer, o sistema faz a apuração automática para você.
+                Este jogo está bloqueado para conferência até o horário oficial do sorteio. Assim que as dezenas saírem, o sistema apura e mostra o resultado automaticamente.
               </p>
             </div>
 
             <div className="space-y-1.5">
-              <span className="text-xs font-bold text-slate-500">Suas dezenas guardadas para este concurso:</span>
+              <span className="text-xs font-bold text-slate-500">Suas dezenas guardadas:</span>
               <div className="flex flex-wrap gap-1.5">
                 {scheduleModal.bet.numbers.map((n) => (
                   <span key={n} className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-extrabold bg-indigo-600 text-white">
