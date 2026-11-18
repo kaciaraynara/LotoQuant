@@ -69,7 +69,7 @@ function computeNextDrawSchedule(slug, lastDrawDateStr = null) {
       const dd = String(cand.getDate()).padStart(2, "0");
       const mm = String(cand.getMonth() + 1).padStart(2, "0");
       const yyyy = cand.getFullYear();
-      const dateFormatted = `\${dd}/${mm}/${yyyy}`;
+      const dateFormatted = dd + "/" + mm + "/" + yyyy;
       const weekdayName = WEEKDAY_NAMES[cand.getDay()];
       return {
         isDaily,
@@ -1031,7 +1031,7 @@ export default function App() {
                 {savedBets.map((bet) => {
                   const rep = bet.auditReport;
                   const sched = computeNextDrawSchedule(bet.modality);
-                  const displayDate = bet.scheduleText || sched.scheduleText;
+                  const displayDate = (bet.scheduleText && !bet.scheduleText.includes("${")) ? bet.scheduleText : sched.scheduleText;
                   // Trava se o relatório vier como PENDING, se ainda não foi apurado, ou se o concurso retornado for anterior ao concurso-alvo
                   const isLocked = !rep || rep.status === "PENDING" || rep.contest_number < bet.targetContest;
                   const hitSet = new Set(!isLocked ? rep?.hits || [] : []);
@@ -1350,4 +1350,5 @@ export default function App() {
     </div>
   );
 }
+
 
