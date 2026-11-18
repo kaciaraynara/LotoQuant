@@ -76,7 +76,7 @@ def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
         select(DrawResult.numbers)
         .where(DrawResult.modality == modality)
         .order_by(DrawResult.contest_number.desc())
-        .limit(20)
+        .limit(25)
     ).scalars().all()
 
     if not cal or len(recent_rows) < 5:
@@ -86,9 +86,10 @@ def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
     weights = dict(cal.number_weights or {})
     universe = range(spec.min_number, spec.max_number + 1)
     last_3 = set(n for d in recent_draws[-3:] for n in d)
+    last_draw = set(recent_draws[-1])
 
     for n in universe:
-        freq_20 = sum(1 for d in recent_draws if n in d) / len(recent_draws)
+        freq_25 = sum(1 for d in recent_draws if n in d) / len(recent_draws)
         streak = 0
         for d in reversed(recent_draws):
             if n in d:
@@ -102,9 +103,12 @@ def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
             else:
                 break
 
-        score = (0.50 * freq_20) + (0.30 * min(delay / 5.0, 1.0)) + (0.20 if n in last_3 else 0.0)
+        # Impulso extra para vizinhos (+-1) das dezenas que saíram no último concurso (rotação de globo)
+        neighbor_boost = 0.08 if ((n - 1 in last_draw) or (n + 1 in last_draw)) and (n not in last_draw) else 0.0
+
+        score = (0.45 * freq_25) + (0.30 * min(delay / 5.0, 1.0)) + (0.17 if n in last_3 else 0.0) + neighbor_boost
         if streak >= 4:
-            score *= 0.72
+            score *= 0.70
         weights[str(n)] = round(float(np.clip(score, 0.15, 0.96)), 4)
 
     sums = [sum(d) for d in recent_draws[-15:]]
@@ -126,6 +130,34 @@ def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
 
 def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], target_contest: Optional[int] = None):
     spec = MODALITIES[modality]
+    latest_row = db.execute(
+        select(DrawResult)
+        .where(DrawResult.modality == modality)
+        .order_by(DrawResult.contest_number.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if not latest_row:
+        return None
+
+    # Se o concurso-alvo do bilhete ainda não aconteceu na Caixa, não marca 0 acerto falso
+    if target_contest and target_contest > latest_row.contest_number:
+        return {
+            "status": "PENDING",
+            "contest_number": target_contest,
+            "draw_date": "Aguardando sorteio oficial",
+            "drawn_numbers": [],
+            "bet_numbers": sorted(bet_numbers),
+            "hits_count": 0,
+            "is_winner": False,
+            "hits": [],
+            "missed_bet": [],
+            "missed_drawn": [],
+            "near_misses": [],
+            "comparison": {"bet_sum": sum(bet_numbers), "drawn_sum": 0, "bet_even": 0, "drawn_even": 0},
+            "diagnostics": [f"Aguardando a Caixa sortear o Concurso #{target_contest} (último oficial: #{latest_row.contest_number})."],
+        }
+
     draw_row = None
     if target_contest:
         draw_row = db.execute(
@@ -136,17 +168,8 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
         ).scalar_one_or_none()
 
     if not draw_row:
-        draw_row = db.execute(
-            select(DrawResult)
-            .where(DrawResult.modality == modality)
-            .order_by(DrawResult.contest_number.desc())
-            .limit(1)
-        ).scalar_one_or_none()
+        draw_row = latest_row
 
-    if not draw_row:
-        return None
-
-    # Busca o sorteio imediatamente anterior ao concurso conferido para medir repetidas reais
     prev_draw_row = db.execute(
         select(DrawResult)
         .where(
@@ -174,13 +197,17 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
 
     is_winner = len(hits) >= min_prize
     frame_set = get_frame_numbers(spec)
-    bet_sum, drawn_sum = sum(bet), sum(drawn)
-    bet_even = sum(1 for n in bet if n % 2 == 0)
+
+    # Escala proporcional (ex: Lotomania marca 50 e sorteia 20 -> divide por 2.5 para comparar justo)
+    scale = len(bet) / max(len(drawn), 1)
+    bet_sum_norm = round(sum(bet) / scale)
+    drawn_sum = sum(drawn)
+    bet_even_norm = round(sum(1 for n in bet if n % 2 == 0) / scale)
     drawn_even = sum(1 for n in drawn if n % 2 == 0)
-    bet_frame = len(bet_set & frame_set)
+    bet_frame_norm = round(len(bet_set & frame_set) / scale)
     drawn_frame = len(drawn_set & frame_set)
 
-    bet_rep = len(bet_set & set(prev_draw_row.numbers)) if prev_draw_row else 0
+    bet_rep = round(len(bet_set & set(prev_draw_row.numbers)) / scale) if prev_draw_row else 0
     drawn_rep = len(drawn_set & set(prev_draw_row.numbers)) if prev_draw_row else 0
 
     diagnostics = []
@@ -190,21 +217,18 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
         missing_to_prize = min_prize - len(hits)
         diagnostics.append(f"Faltaram {missing_to_prize} ponto(s) para premiação mínima ({min_prize} pts).")
 
-    if abs(bet_sum - drawn_sum) > 20:
-        direction = "mais alta" if drawn_sum > bet_sum else "mais baixa"
-        diagnostics.append(f"Soma do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum}).")
-    if abs(bet_even - drawn_even) >= 2:
-        diagnostics.append(f"Pares: aposta tinha {bet_even}, mas o sorteio trouxe {drawn_even}.")
-    if abs(bet_frame - drawn_frame) >= 2:
-        diagnostics.append(f"Moldura: aposta tinha {bet_frame} na borda, sorteio trouxe {drawn_frame}.")
-    if prev_draw_row and abs(bet_rep - drawn_rep) >= 2:
-        diagnostics.append(f"Repetidas do anterior: aposta marcou {bet_rep}, sorteio repetiu {drawn_rep}.")
+    if abs(bet_sum_norm - drawn_sum) > 22:
+        direction = "mais alta" if drawn_sum > bet_sum_norm else "mais baixa"
+        diagnostics.append(f"Soma proporcional do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum_norm}).")
+    if abs(bet_even_norm - drawn_even) >= 2:
+        diagnostics.append(f"Pares proporcionais: aposta tinha {bet_even_norm}, sorteio trouxe {drawn_even}.")
     if near_misses:
         diagnostics.append(f"Passaram raspando por 1 número: {', '.join(f'{n:02d}' for n in near_misses)}.")
-    if missed_drawn:
+    if missed_drawn and len(missed_drawn) <= 15:
         diagnostics.append(f"Bolas sorteadas que ficaram de fora: {', '.join(f'{n:02d}' for n in missed_drawn)}.")
 
     return {
+        "status": "AUDITED",
         "contest_number": draw_row.contest_number,
         "draw_date": str(draw_row.draw_date),
         "drawn_numbers": drawn,
@@ -216,11 +240,11 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
         "missed_drawn": missed_drawn,
         "near_misses": near_misses,
         "comparison": {
-            "bet_sum": bet_sum,
+            "bet_sum": bet_sum_norm,
             "drawn_sum": drawn_sum,
-            "bet_even": bet_even,
+            "bet_even": bet_even_norm,
             "drawn_even": drawn_even,
-            "bet_frame": bet_frame,
+            "bet_frame": bet_frame_norm,
             "drawn_frame": drawn_frame,
             "bet_repeat": bet_rep,
             "drawn_repeat": drawn_rep,
@@ -286,7 +310,7 @@ def auto_check_batch(body: AutoBatchCheckRequest, db: Session = Depends(get_db))
             continue
         rep = _evaluate_single_audit(db, item.modality, item.numbers, item.target_contest)
         if rep:
-            if body.auto_train and item.modality not in trained_modalities:
+            if body.auto_train and rep.get("status") == "AUDITED" and item.modality not in trained_modalities:
                 if _recalibrate_modality_weights(db, item.modality):
                     trained_modalities.add(item.modality)
             rep["trained"] = item.modality in trained_modalities
