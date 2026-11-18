@@ -16,6 +16,13 @@ import {
   Trash2,
   Wand2,
   ShieldCheck,
+  Eye,
+  CalendarClock,
+  Lock,
+  Copy,
+  Check,
+  X,
+  BellRing,
 } from "lucide-react";
 import { api } from "./services/api";
 import LandingPage from "./components/LandingPage";
@@ -37,6 +44,7 @@ export default function App() {
   const [excludedNums, setExcludedNums] = useState([]);
   const [generatedGames, setGeneratedGames] = useState([]);
   const [savedIds, setSavedIds] = useState([]);
+  const [copiedKey, setCopiedKey] = useState("");
   const [loadingGen, setLoadingGen] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
@@ -63,6 +71,8 @@ export default function App() {
   const [evResult, setEvResult] = useState(null);
 
   const [backtestModal, setBacktestModal] = useState(null);
+  const [resultModal, setResultModal] = useState(null);
+  const [scheduleModal, setScheduleModal] = useState(null);
   const [statusAlert, setStatusAlert] = useState(null);
 
   useEffect(() => {
@@ -159,7 +169,7 @@ export default function App() {
 
   async function handleSyncCurrent(modSlug = selectedMod) {
     setSyncing(true);
-    setStatusAlert({ type: "info", text: "Buscando os últimos resultados da Caixa e conferindo seus jogos..." });
+    setStatusAlert({ type: "info", text: "Atualizando resultados oficiais da Caixa e conferindo seus jogos..." });
     try {
       const syncRes = await api.syncModality(modSlug, 50);
       const cal = await api.getCalibration(modSlug);
@@ -168,7 +178,7 @@ export default function App() {
       await runAutoCheckAll(savedBets);
       setStatusAlert({
         type: "success",
-        text: `Tudo atualizado! Último concurso oficial: #${syncRes.reference_contest}. Seus jogos foram conferidos.`,
+        text: `Base atualizada! Último sorteio oficial: Concurso #${syncRes.reference_contest}.`,
       });
     } catch (err) {
       setStatusAlert({ type: "error", text: `Não foi possível atualizar agora: ${err.message}` });
@@ -186,6 +196,13 @@ export default function App() {
     } else {
       setFixedNums([...fixedNums, num]);
     }
+  }
+
+  function copyNumbers(numbers, tag) {
+    const text = numbers.map((n) => String(n).padStart(2, "0")).join(" - ");
+    navigator.clipboard.writeText(text);
+    setCopiedKey(tag);
+    setTimeout(() => setCopiedKey(""), 2200);
   }
 
   async function handleGenerate(autoSmart = false) {
@@ -221,7 +238,7 @@ export default function App() {
       }
       setStatusAlert({
         type: "success",
-        text: `Pronto! ${gamesList.length} jogos selecionados para o concurso #${res.reference_contest}.`,
+        text: `Pronto! ${gamesList.length} jogos de alta precisão gerados para o Concurso #${res.reference_contest}.`,
       });
       setUser(await api.me());
     } catch (err) {
@@ -238,6 +255,9 @@ export default function App() {
       id: `${Date.now()}_${Math.floor(Math.random() * 10000)}`,
       modality: selectedMod,
       modalityName: currentSpec?.name || selectedMod.toUpperCase(),
+      isDaily: currentSpec?.is_daily ?? false,
+      drawDays: currentSpec?.draw_days || "",
+      nextDrawInfo: calibration?.next_draw_info || null,
       targetContest: (calibration?.reference_contest || 0) + 1,
       savedAt: new Date().toLocaleDateString("pt-BR"),
       numbers: [...game.numbers],
@@ -251,8 +271,31 @@ export default function App() {
     runAutoCheckAll(updated);
     setStatusAlert({
       type: "success",
-      text: `Jogo guardado! Acompanhe na aba "Meus Jogos & Conferência".`,
+      text: `Jogo guardado! Veja o dia do sorteio e acompanhe na aba "Meus Jogos & Conferência".`,
     });
+  }
+
+  async function handleViewBetResult(bet) {
+    try {
+      const report = await api.postDrawAudit({
+        modality: bet.modality,
+        bet_numbers: bet.numbers,
+        target_contest: bet.targetContest,
+        apply_learning: false,
+      });
+
+      setSavedBets((prev) =>
+        prev.map((item) => (item.id === bet.id ? { ...item, auditReport: report } : item))
+      );
+
+      if (report.status === "PENDING") {
+        setScheduleModal({ bet, report });
+      } else {
+        setResultModal({ bet, report });
+      }
+    } catch (err) {
+      setStatusAlert({ type: "error", text: err.message });
+    }
   }
 
   async function trainSystemWithResult(bet) {
@@ -273,9 +316,10 @@ export default function App() {
         setCalibration(await api.getCalibration(bet.modality));
         await loadIdealDailyPick(bet.modality);
       }
+      setResultModal(null);
       setStatusAlert({
         type: "success",
-        text: `Pronto! O Cartão Ouro já foi atualizado com base no resultado do concurso #${report.contest_number}.`,
+        text: `Cartão Ouro recalibrado com o resultado oficial do Concurso #${report.contest_number}!`,
       });
     } catch (err) {
       setStatusAlert({ type: "error", text: err.message });
@@ -336,7 +380,7 @@ export default function App() {
 
   function exportCsv(games) {
     const rows = [
-      ["Jogo", "Dezenas", "Nota_do_Jogo_%", "Chance_Ganhar_Sozinho_%", "Soma", "Pares"],
+      ["Jogo", "Dezenas", "Forca_do_Jogo_%", "Ganhar_Sozinho_%", "Soma", "Pares"],
       ...games.map((g, i) => [
         i + 1,
         g.numbers.map((n) => String(n).padStart(2, "0")).join(" - "),
@@ -377,7 +421,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
-      {/* Cabeçalho Principal */}
+      {/* Cabeçalho */}
       <header className="border-b border-slate-200 bg-white/95 backdrop-blur-md sticky top-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -422,29 +466,38 @@ export default function App() {
             <button
               key={m.slug}
               onClick={() => setSelectedMod(m.slug)}
-              className={`px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap border transition ${
+              className={`px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap border transition flex items-center gap-1.5 ${
                 selectedMod === m.slug
                   ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-600/20"
                   : "bg-white border-slate-200 text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
               }`}
             >
-              {m.name}
+              <span>{m.name}</span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${selectedMod === m.slug ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"}`}>
+                {m.is_daily ? "Diário" : "Dias Específicos"}
+              </span>
             </button>
           ))}
         </div>
 
-        {/* Painel do Último Resultado Oficial */}
+        {/* Painel do Último Resultado Oficial + Próximo Dia de Sorteio */}
         {calibration && (
           <div className="clean-card p-5 rounded-2xl flex flex-wrap items-center justify-between gap-4 animate-fade-up">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  Resultado Oficial
+                  Último Resultado Oficial
                 </span>
                 <span className="text-xs text-slate-700 font-extrabold">
                   Concurso #{calibration.reference_contest} ({calibration.reference_date || "Atualizado"})
                 </span>
+                {calibration.next_draw_info && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-bold rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                    <CalendarClock className="w-3.5 h-3.5" />
+                    Próximo Sorteio: {calibration.next_draw_info.weekday_name} ({calibration.next_draw_info.next_date})
+                  </span>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs text-slate-500 font-semibold mr-1">Bolas sorteadas:</span>
@@ -489,19 +542,26 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-extrabold bg-indigo-600 text-white uppercase shadow-sm">
                   <Star className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
-                  Cartão Ouro do Dia • Concurso #{(calibration?.reference_contest || 0) + 1}
+                  Cartão Ouro • Concurso #{(calibration?.reference_contest || 0) + 1}
                 </span>
                 <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">
-                  Força do Jogo: {idealDailyGame.adherence_score}%
+                  Mira 1º e 2º Prêmio: {idealDailyGame.adherence_score}%
                 </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => copyNumbers(idealDailyGame.numbers, "gold")}
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold transition"
+                >
+                  {copiedKey === "gold" ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedKey === "gold" ? "Copiado!" : "Copiar Dezenas"}
+                </button>
                 <button
                   onClick={() => handleBacktest(idealDailyGame.numbers)}
-                  className="inline-flex items-center gap-1.5 text-xs px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold transition"
+                  className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold transition"
                 >
                   <History className="w-3.5 h-3.5" />
-                  Ver Pontos Passados
+                  Pontos Passados
                 </button>
                 <button
                   onClick={() => saveGameToNotebook(idealDailyGame, "ideal_daily")}
@@ -685,6 +745,12 @@ export default function App() {
                                 Ganhar Sozinho: {game.antipopularity_pct}%
                               </span>
                             )}
+                            <button
+                              onClick={() => copyNumbers(game.numbers, tag)}
+                              className="text-xs px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold"
+                            >
+                              {copiedKey === tag ? "Copiado!" : "Copiar"}
+                            </button>
                             <button
                               onClick={() => handleBacktest(game.numbers)}
                               className="text-xs px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold"
@@ -880,14 +946,14 @@ export default function App() {
           </div>
         )}
 
-        {/* ABA 4: MEUS JOGOS & CONFERÊNCIA AUTOMÁTICA */}
+        {/* ABA 4: MEUS JOGOS & CONFERÊNCIA AUTOMÁTICA COM TRAVA DE CALENDÁRIO */}
         {activeTab === "saved" && (
           <div className="clean-card p-6 rounded-2xl space-y-5 animate-fade-up">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-lg font-extrabold text-slate-900">Meus Jogos & Conferência Automática</h2>
+                <h2 className="text-lg font-extrabold text-slate-900">Meus Jogos & Conferência Inteligente</h2>
                 <p className="text-xs text-slate-500">
-                  Verde = você acertou • Amarelo = passou raspando por 1 número. Jogos de concursos futuros aguardam o sorteio oficial.
+                  Jogos de concursos futuros ficam travados até o dia oficial do sorteio para nunca confundir você. Clique em <strong>Ver Resultado</strong> para abrir o raio-x completo.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -926,44 +992,64 @@ export default function App() {
                   const nearSet = new Set(rep?.near_misses || []);
 
                   return (
-                    <div key={bet.id} className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                    <div
+                      key={bet.id}
+                      className={`p-4 rounded-2xl border space-y-3 transition ${
+                        isPending
+                          ? "bg-amber-50/40 border-amber-200"
+                          : rep?.is_winner
+                          ? "bg-emerald-50/50 border-emerald-300"
+                          : "bg-slate-50 border-slate-200"
+                      }`}
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span className="font-extrabold uppercase text-indigo-700">{bet.modalityName}</span>
-                          <span className="text-slate-500">• Concurso #{bet.targetContest}</span>
-                          {rep && (
+                          <span className="px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-600 font-bold">
+                            {bet.isDaily ? "Sorteio Diário" : "Dias Específicos"}
+                          </span>
+                          <span className="text-slate-600 font-semibold">• Concurso #{bet.targetContest}</span>
+
+                          {isPending ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-extrabold bg-amber-100 text-amber-900 border border-amber-300">
+                              <Lock className="w-3 h-3" />
+                              Travado • Sorteio {rep.weekday_name} ({rep.draw_date})
+                            </span>
+                          ) : rep ? (
                             <span
                               className={`px-2.5 py-0.5 rounded-full font-extrabold ${
-                                isPending
-                                  ? "bg-amber-100 text-amber-900"
-                                  : rep.is_winner
-                                  ? "bg-emerald-600 text-white"
-                                  : "bg-indigo-100 text-indigo-800"
+                                rep.is_winner ? "bg-emerald-600 text-white" : "bg-indigo-100 text-indigo-800"
                               }`}
                             >
-                              {isPending
-                                ? "Aguardando Sorteio Oficial"
-                                : rep.is_winner
+                              {rep.is_winner
                                 ? `PREMIADO: ${rep.hits_count} acertos!`
                                 : `${rep.hits_count} acertos (Conc. #${rep.contest_number})`}
                             </span>
-                          )}
-                          {rep?.trained && (
-                            <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-bold">
-                              Cartão Ouro Atualizado ✓
-                            </span>
-                          )}
+                          ) : null}
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
-                          {!isPending && (
+                          <button
+                            onClick={() => handleViewBetResult(bet)}
+                            className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-sm ${
+                              isPending
+                                ? "bg-amber-500 hover:bg-amber-600 text-white"
+                                : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                            }`}
+                          >
+                            {isPending ? <BellRing className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            {isPending ? "Ver Data do Sorteio" : "Ver Resultado"}
+                          </button>
+
+                          {!isPending && rep && (
                             <button
                               onClick={() => trainSystemWithResult(bet)}
                               className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition"
                             >
-                              Melhorar Próximo Jogo c/ Este Resultado
+                              Recalibrar Cartão Ouro
                             </button>
                           )}
+
                           <button
                             onClick={() => setSavedBets(savedBets.filter((x) => x.id !== bet.id))}
                             className="px-2.5 py-1.5 rounded-xl text-xs text-slate-500 hover:bg-slate-200 font-semibold"
@@ -990,18 +1076,15 @@ export default function App() {
                       </div>
 
                       {rep && (
-                        <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1.5 text-xs">
-                          {!isPending && (
-                            <div className="flex flex-wrap gap-4 text-slate-600">
-                              <span><strong className="text-emerald-700">Verde:</strong> Acertou ({rep.hits_count})</span>
-                              <span><strong className="text-amber-600">Amarelo:</strong> Passou raspando ({rep.near_misses.length})</span>
-                              <span>Soma: <strong>{rep.comparison.bet_sum}</strong> (Sorteio: <strong>{rep.comparison.drawn_sum}</strong>)</span>
-                              <span>Pares: <strong>{rep.comparison.bet_even}</strong> (Sorteio: <strong>{rep.comparison.drawn_even}</strong>)</span>
-                            </div>
+                        <div className="p-3 rounded-xl bg-white border border-slate-200 text-xs text-slate-700 font-semibold">
+                          {isPending ? (
+                            <span className="text-amber-900 flex items-center gap-1.5">
+                              <CalendarClock className="w-4 h-4 text-amber-600 shrink-0" />
+                              {rep.schedule_notice} O sistema desbloqueia a conferência automaticamente após o sorteio da Caixa.
+                            </span>
+                          ) : (
+                            <span>{rep.diagnostics.join(" ")}</span>
                           )}
-                          <div className="text-slate-700 font-semibold pt-1 border-t border-slate-100">
-                            {rep.diagnostics.join(" ")}
-                          </div>
                         </div>
                       )}
                     </div>
@@ -1045,6 +1128,150 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* MODAL 1: NOTIFICAÇÃO DE DATA DO SORTEIO (JOGO TRAVADO) */}
+      {scheduleModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="clean-card max-w-md w-full p-6 rounded-3xl space-y-4 animate-fade-up">
+            <div className="flex items-center justify-between">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-extrabold">
+                <CalendarClock className="w-4 h-4" />
+                Sorteio Ainda Não Realizado
+              </div>
+              <button onClick={() => setScheduleModal(null)} className="p-1 rounded-lg hover:bg-slate-100">
+                <X className="w-4 h-4 text-slate-500" />
+              </button>
+            </div>
+
+            <h3 className="text-xl font-extrabold text-slate-900">
+              {scheduleModal.bet.modalityName} • Concurso #{scheduleModal.bet.targetContest}
+            </h3>
+
+            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-1.5">
+              <p className="text-sm font-extrabold text-amber-950">
+                {scheduleModal.report.schedule_notice}
+              </p>
+              <p className="text-xs text-amber-800">
+                Para evitar qualquer confusão, este bilhete fica travado até a Caixa divulgar as dezenas oficiais. Assim que o sorteio ocorrer, clique em <strong>Atualizar Resultados</strong> e depois em <strong>Ver Resultado</strong>.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="text-xs font-bold text-slate-500">Suas dezenas guardadas para este concurso:</span>
+              <div className="flex flex-wrap gap-1.5">
+                {scheduleModal.bet.numbers.map((n) => (
+                  <span key={n} className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-extrabold bg-indigo-600 text-white">
+                    {String(n).padStart(2, "0")}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setScheduleModal(null)}
+              className="w-full py-2.5 rounded-xl bg-slate-900 text-white font-bold text-sm hover:bg-slate-800 transition"
+            >
+              Entendi, Aguardar Sorteio
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: VER RESULTADO COMPLETO (LADO A LADO) */}
+      {resultModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="clean-card max-w-xl w-full p-6 rounded-3xl space-y-5 animate-fade-up max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-xs font-extrabold uppercase text-indigo-600">{resultModal.bet.modalityName}</span>
+                <h3 className="text-xl font-extrabold text-slate-900">
+                  Resultado Oficial • Concurso #{resultModal.report.contest_number}
+                </h3>
+                <p className="text-xs text-slate-500">Sorteado em {resultModal.report.draw_date}</p>
+              </div>
+              <button onClick={() => setResultModal(null)} className="p-1.5 rounded-lg hover:bg-slate-100">
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+
+            <div className={`p-4 rounded-2xl border text-sm font-extrabold ${resultModal.report.is_winner ? "bg-emerald-50 border-emerald-300 text-emerald-800" : "bg-indigo-50 border-indigo-200 text-indigo-900"}`}>
+              {resultModal.report.is_winner
+                ? `PARABÉNS! Bilhete premiado com ${resultModal.report.hits_count} acertos!`
+                : `Você fez ${resultModal.report.hits_count} acertos neste concurso.`}
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-xs font-extrabold text-slate-700 block">Bolas Sorteadas pela Caixa:</span>
+              <div className="flex flex-wrap gap-1.5">
+                {resultModal.report.drawn_numbers.map((n) => {
+                  const matched = resultModal.report.hits.includes(n);
+                  return (
+                    <span
+                      key={n}
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-extrabold ${
+                        matched ? "bg-emerald-600 text-white ring-2 ring-emerald-300" : "bg-slate-200 text-slate-800"
+                      }`}
+                    >
+                      {String(n).padStart(2, "0")}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-xs font-extrabold text-slate-700 block">
+                Seu Jogo (Verde = Acertou • Amarelo = Passou raspando por 1 número):
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {resultModal.bet.numbers.map((n) => {
+                  const isHit = resultModal.report.hits.includes(n);
+                  const isNear = resultModal.report.near_misses.includes(n);
+                  return (
+                    <span
+                      key={n}
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-extrabold ${
+                        isHit
+                          ? "bg-emerald-600 text-white"
+                          : isNear
+                          ? "bg-amber-400 text-slate-950"
+                          : "bg-slate-100 border border-slate-300 text-slate-500"
+                      }`}
+                    >
+                      {String(n).padStart(2, "0")}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+              <div className="flex flex-wrap gap-4 text-slate-600">
+                <span>Soma do Jogo: <strong>{resultModal.report.comparison.bet_sum}</strong> (Sorteio: <strong>{resultModal.report.comparison.drawn_sum}</strong>)</span>
+                <span>Pares: <strong>{resultModal.report.comparison.bet_even}</strong> (Sorteio: <strong>{resultModal.report.comparison.drawn_even}</strong>)</span>
+              </div>
+              <p className="text-slate-700 font-semibold pt-1 border-t border-slate-200">
+                {resultModal.report.diagnostics.join(" ")}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-3 pt-1">
+              <button
+                onClick={() => trainSystemWithResult(resultModal.bet)}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition"
+              >
+                Usar Este Resultado p/ Melhorar o Cartão Ouro
+              </button>
+              <button
+                onClick={() => setResultModal(null)}
+                className="px-5 py-2.5 rounded-xl bg-slate-900 text-white font-bold text-xs"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {backtestModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">

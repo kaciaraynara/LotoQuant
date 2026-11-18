@@ -1,4 +1,4 @@
-﻿from datetime import date
+﻿from datetime import date, datetime, timedelta
 from typing import List, Optional
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +17,50 @@ from app.engine.syndicate_math import SyndicateMathEngine
 from app.services.daily_pipeline import DailyPipelineService
 
 router = APIRouter(prefix="/engine", tags=["Motor Estatístico & Gerador"])
+
+# Dias oficiais de sorteio na Caixa (0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sáb, 6=Dom)
+DRAW_WEEKDAYS = {
+    "lotofacil": [0, 1, 2, 3, 4, 5],
+    "quina": [0, 1, 2, 3, 4, 5],
+    "supersete": [0, 2, 4],
+    "lotomania": [0, 2, 4],
+    "duplasena": [0, 2, 4],
+    "megasena": [1, 3, 5],
+    "diadesorte": [1, 3, 5],
+    "timemania": [1, 3, 5],
+    "maismilionaria": [2, 5],
+}
+
+WEEKDAY_NAMES_PT = [
+    "Segunda-feira",
+    "Terça-feira",
+    "Quarta-feira",
+    "Quinta-feira",
+    "Sexta-feira",
+    "Sábado",
+    "Domingo",
+]
+
+
+def _next_official_draw_info(modality: str, last_draw_date: Optional[date] = None) -> dict:
+    allowed = DRAW_WEEKDAYS.get(modality, [0, 1, 2, 3, 4, 5])
+    base = max(date.today(), (last_draw_date + timedelta(days=1)) if last_draw_date else date.today())
+    for offset in range(0, 8):
+        cand = base + timedelta(days=offset)
+        if cand.weekday() in allowed:
+            day_name = WEEKDAY_NAMES_PT[cand.weekday()]
+            return {
+                "next_date": cand.strftime("%d/%m/%Y"),
+                "weekday_name": day_name,
+                "is_today": cand == date.today(),
+                "message": f"Este sorteio será na {day_name}, dia {cand.strftime('%d/%m/%Y')} às 20h.",
+            }
+    return {
+        "next_date": base.strftime("%d/%m/%Y"),
+        "weekday_name": WEEKDAY_NAMES_PT[base.weekday()],
+        "is_today": base == date.today(),
+        "message": f"Este sorteio será no dia {base.strftime('%d/%m/%Y')} às 20h.",
+    }
 
 
 class GenerateRequest(BaseModel):
@@ -103,9 +147,7 @@ def _recalibrate_modality_weights(db: Session, modality: str) -> bool:
             else:
                 break
 
-        # Impulso extra para vizinhos (+-1) das dezenas que saíram no último concurso (rotação de globo)
         neighbor_boost = 0.08 if ((n - 1 in last_draw) or (n + 1 in last_draw)) and (n not in last_draw) else 0.0
-
         score = (0.45 * freq_25) + (0.30 * min(delay / 5.0, 1.0)) + (0.17 if n in last_3 else 0.0) + neighbor_boost
         if streak >= 4:
             score *= 0.70
@@ -140,12 +182,17 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
     if not latest_row:
         return None
 
-    # Se o concurso-alvo do bilhete ainda não aconteceu na Caixa, não marca 0 acerto falso
+    next_info = _next_official_draw_info(modality, latest_row.draw_date)
+
+    # Trava inteligente: se o concurso-alvo ainda não ocorreu na Caixa, bloqueia conferência e informa a data real
     if target_contest and target_contest > latest_row.contest_number:
         return {
             "status": "PENDING",
             "contest_number": target_contest,
-            "draw_date": "Aguardando sorteio oficial",
+            "draw_date": next_info["next_date"],
+            "weekday_name": next_info["weekday_name"],
+            "is_today": next_info["is_today"],
+            "schedule_notice": next_info["message"],
             "drawn_numbers": [],
             "bet_numbers": sorted(bet_numbers),
             "hits_count": 0,
@@ -155,7 +202,9 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
             "missed_drawn": [],
             "near_misses": [],
             "comparison": {"bet_sum": sum(bet_numbers), "drawn_sum": 0, "bet_even": 0, "drawn_even": 0},
-            "diagnostics": [f"Aguardando a Caixa sortear o Concurso #{target_contest} (último oficial: #{latest_row.contest_number})."],
+            "diagnostics": [
+                f"{next_info['message']} O resultado oficial ainda não foi sorteado (último concurso: #{latest_row.contest_number})."
+            ],
         }
 
     draw_row = None
@@ -198,7 +247,6 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
     is_winner = len(hits) >= min_prize
     frame_set = get_frame_numbers(spec)
 
-    # Escala proporcional (ex: Lotomania marca 50 e sorteia 20 -> divide por 2.5 para comparar justo)
     scale = len(bet) / max(len(drawn), 1)
     bet_sum_norm = round(sum(bet) / scale)
     drawn_sum = sum(drawn)
@@ -212,25 +260,26 @@ def _evaluate_single_audit(db: Session, modality: str, bet_numbers: List[int], t
 
     diagnostics = []
     if is_winner:
-        diagnostics.append(f"BILHETE PREMIADO! Você fez {len(hits)} acertos no concurso #{draw_row.contest_number}.")
+        diagnostics.append(f"BILHETE PREMIADO! Você acertou {len(hits)} dezenas no concurso #{draw_row.contest_number}.")
     else:
         missing_to_prize = min_prize - len(hits)
-        diagnostics.append(f"Faltaram {missing_to_prize} ponto(s) para premiação mínima ({min_prize} pts).")
+        diagnostics.append(f"Faltaram {missing_to_prize} acerto(s) para entrar na faixa de prêmio ({min_prize} pontos).")
 
     if abs(bet_sum_norm - drawn_sum) > 22:
         direction = "mais alta" if drawn_sum > bet_sum_norm else "mais baixa"
-        diagnostics.append(f"Soma proporcional do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum_norm}).")
+        diagnostics.append(f"Soma do sorteio ({drawn_sum}) veio {direction} que a aposta ({bet_sum_norm}).")
     if abs(bet_even_norm - drawn_even) >= 2:
-        diagnostics.append(f"Pares proporcionais: aposta tinha {bet_even_norm}, sorteio trouxe {drawn_even}.")
+        diagnostics.append(f"Pares: aposta tinha {bet_even_norm}, sorteio trouxe {drawn_even}.")
     if near_misses:
         diagnostics.append(f"Passaram raspando por 1 número: {', '.join(f'{n:02d}' for n in near_misses)}.")
-    if missed_drawn and len(missed_drawn) <= 15:
-        diagnostics.append(f"Bolas sorteadas que ficaram de fora: {', '.join(f'{n:02d}' for n in missed_drawn)}.")
 
     return {
         "status": "AUDITED",
         "contest_number": draw_row.contest_number,
         "draw_date": str(draw_row.draw_date),
+        "weekday_name": WEEKDAY_NAMES_PT[draw_row.draw_date.weekday()] if draw_row.draw_date else "",
+        "is_today": False,
+        "schedule_notice": f"Concurso #{draw_row.contest_number} já sorteado em {draw_row.draw_date}.",
         "drawn_numbers": drawn,
         "bet_numbers": bet,
         "hits_count": len(hits),
@@ -263,6 +312,7 @@ def list_modalities():
             "max_number": m.max_number,
             "default_bet_size": m.default_bet_size,
             "draw_days": m.draw_days,
+            "is_daily": len(DRAW_WEEKDAYS.get(m.slug, [])) >= 6,
         }
         for m in MODALITIES.values()
     ]
@@ -283,21 +333,19 @@ def get_calibration(modality: str, db: Session = Depends(get_db)):
         .limit(1)
     ).scalar_one_or_none()
 
-    draws = [
-        r.numbers for r in db.execute(select(DrawResult.numbers).where(DrawResult.modality == modality)).all()
-    ]
-    chi2_report = SyndicateMathEngine(MODALITIES[modality], draws).audit_chi_square()
+    next_info = _next_official_draw_info(modality, last_draw_row.draw_date if last_draw_row else None)
 
     return {
         "modality": cal.modality,
         "reference_contest": cal.reference_contest,
         "reference_date": str(last_draw_row.draw_date) if last_draw_row else None,
         "reference_numbers": last_draw_row.numbers if last_draw_row else cal.thresholds.get("last_draw", []),
+        "next_draw_info": next_info,
+        "is_daily": len(DRAW_WEEKDAYS.get(modality, [])) >= 6,
         "source_status": "OFICIAL_CAIXA" if (last_draw_row and last_draw_row.extra_label != "BASE_CALIBRADA") else "MODELO_CALIBRADO",
         "calibrated_at": cal.calibrated_at,
         "thresholds": cal.thresholds,
         "number_weights": cal.number_weights,
-        "chi2_audit": chi2_report,
     }
 
 
@@ -327,7 +375,7 @@ def post_draw_audit(body: PostDrawAuditRequest, db: Session = Depends(get_db)):
     if not rep:
         raise HTTPException(status_code=404, detail="Nenhum resultado oficial sincronizado para conferir.")
 
-    trained = _recalibrate_modality_weights(db, body.modality) if body.apply_learning else False
+    trained = _recalibrate_modality_weights(db, body.modality) if (body.apply_learning and rep.get("status") == "AUDITED") else False
     rep["trained"] = trained
     return rep
 
@@ -408,9 +456,9 @@ def generate_closing(
     tier = PlanTier(user.plan_tier)
     rules = PLAN_LIMITS[tier]
     if not rules["allow_closing"]:
-        raise HTTPException(status_code=403, detail="Fechamentos combinatórios disponíveis apenas nos planos Pro e Elite.")
+        raise HTTPException(status_code=403, detail="Fechamentos disponíveis apenas nos planos Profissional e Elite.")
     if len(body.selected_numbers) > rules["max_closing_pool"]:
-        raise HTTPException(status_code=403, detail=f"Seu plano permite fechamentos de até {rules['max_closing_pool']} dezenas.")
+        raise HTTPException(status_code=403, detail=f"Seu plano permite cercar até {rules['max_closing_pool']} dezenas.")
 
     cal = db.execute(select(DailyCalibration).where(DailyCalibration.modality == body.modality)).scalar_one_or_none()
     if not cal:
